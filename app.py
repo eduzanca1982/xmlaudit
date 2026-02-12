@@ -6,29 +6,28 @@ import re
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 
-# 1. CONFIGURACIÓN DE PÁGINA
-st.set_page_config(
-    page_title="WAF Auditor Pro | Security Analysis",
-    page_icon="🛡️",
-    layout="wide"
-)
+st.set_page_config(page_title="WAF Auditor 2.5 Pro", layout="wide", page_icon="🛡️")
 
-# 2. CARGA DE SECRETOS
+# 1. CARGA DE API KEY
 try:
     api_key = st.secrets["GOOGLE_API_KEY"]
-except Exception:
-    st.error("⚠️ Error: No se encontró la 'GOOGLE_API_KEY' en Secrets.")
+except:
+    st.error("Error: Configura GOOGLE_API_KEY en Secrets.")
     st.stop()
 
-# 3. ESTILOS CSS
-st.markdown("""
-    <style>
-    .stMetric { background-color: #f8f9fa; padding: 15px; border-radius: 10px; border: 1px solid #dee2e6; }
-    </style>
-    """, unsafe_allow_html=True)
+# 2. FUNCIÓN DE LIMPIEZA TÉCNICA (REDUCCIÓN DE TOKENS)
+def optimize_xml(xml_content):
+    # Eliminar comentarios
+    xml_content = re.sub(r"", "", xml_content, flags=re.DOTALL)
+    # Eliminar metadata de Akamai que no influye en seguridad (ahorra ~15% de tokens)
+    tags_ignorar = ["lastModifiedBy", "lastModifiedDate", "createDate", "createdBy", "systemMetadata"]
+    for tag in tags_ignorar:
+        xml_content = re.sub(f"<{tag}>.*?</{tag}>", "", xml_content, flags=re.DOTALL)
+    # Minificar: quitar espacios en blanco innecesarios
+    return " ".join(xml_content.split())
 
-# 4. FUNCIÓN DE ANÁLISIS
-def analyze_configurations(xml_content):
+# 3. LÓGICA DE AUDITORÍA
+def run_audit(content):
     safety_settings = {
         "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
         "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
@@ -36,91 +35,76 @@ def analyze_configurations(xml_content):
         "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
     }
 
-    # ACTUALIZACIÓN: Se usa gemini-2.0-flash para mayor compatibilidad con la API v1beta
+    # Usamos Gemini 2.5 Pro para máxima ventana de contexto
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash", 
+        model="gemini-2.5-pro", 
         google_api_key=api_key,
-        temperature=0.1,
+        temperature=0,
         safety_settings=safety_settings
     )
     
     prompt = f"""
-    Actúa como un Senior Security Engineer experto en Akamai App & API Protector.
-    Analiza el siguiente contenido XML de políticas WAF:
-
-    {xml_content}
-
+    ERES: Senior Security Engineer / Akamai Specialist.
+    CONTEXTO: Se adjuntan políticas WAF en formato XML.
+    
     TAREAS:
-    1. Identifica configuraciones inseguras (ej. reglas críticas en modo ALERT en lugar de DENY).
-    2. Detecta oportunidades de mejora en la postura de seguridad y optimización de reglas de Bot Manager.
-    3. Encuentra posibles falsos positivos basados en las excepciones configuradas.
-    4. Genera una tabla de hallazgos con Criticidad (Critico, Alto, Medio, Bajo), Descripción y Recomendación.
-
-    IMPORTANTE: Al final de tu respuesta, añade la sección "METRICAS_DATOS" seguida de un objeto JSON con este formato exacto:
+    1. Detectar reglas críticas en modo 'Alert' que deberían estar en 'Deny'.
+    2. Identificar inconsistencias en la configuración de Bot Manager.
+    3. Listar oportunidades de mejora para endurecer (harden) la postura de seguridad.
+    
+    IMPORTANTE: Finaliza con la sección METRICAS_DATOS y el JSON:
     {{"Critico": X, "Alto": X, "Medio": X, "Bajo": X}}
 
-    Responde en español con tono profesional.
+    POLÍTICAS:
+    {content}
     """
+    
+    return llm.invoke([HumanMessage(content=prompt)]).content
 
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return response.content
+# 4. INTERFAZ STREAMLIT
+st.title("🛡️ WAF Policy Auditor Pro (Gemini 2.5)")
 
-# 5. INTERFAZ
-st.title("🛡️ WAF Policy Auditor Pro")
-st.markdown("---")
+files = st.file_uploader("Sube archivos XML (Akamai WAF)", type="xml", accept_multiple_files=True)
 
-uploaded_files = st.file_uploader(
-    "Sube archivos XML de configuración", 
-    type=["xml"], 
-    accept_multiple_files=True
-)
-
-if uploaded_files:
-    if st.button("🔍 Iniciar Auditoría Profunda", use_container_width=True):
+if files:
+    if st.button("🚀 Iniciar Análisis de Gran Escala"):
         try:
-            combined_text = ""
-            for f in uploaded_files:
-                combined_text += f"\n--- ORIGEN: {f.name} ---\n{f.read().decode('utf-8')}\n"
+            full_raw_text = ""
+            for f in files:
+                full_raw_text += f.read().decode('utf-8')
+            
+            # Optimización previa
+            with st.status("Optimizando XML y reduciendo tokens...") as status:
+                clean_text = optimize_xml(full_raw_text)
+                st.write(f"Tokens originales estimados: {len(full_raw_text)//4}")
+                st.write(f"Tokens tras optimización: {len(clean_text)//4}")
+                status.update(label="Análisis optimizado listo. Enviando a Gemini 2.5 Pro...", state="complete")
 
-            with st.spinner("Conectando con Gemini 2.0 Flash..."):
-                full_response = analyze_configurations(combined_text)
-
-                # Parsing de respuesta y JSON
-                report_text = full_response.split("METRICAS_DATOS")[0]
-                json_match = re.search(r'\{.*\}', full_response.split("METRICAS_DATOS")[-1], re.DOTALL)
+            with st.spinner("Gemini 2.5 Pro analizando configuración masiva..."):
+                response = run_audit(clean_text)
                 
-                metrics = json.loads(json_match.group()) if json_match else {"Critico": 0, "Alto": 0, "Medio": 0, "Bajo": 0}
+                # Separación de Informe y Métricas
+                parts = response.split("METRICAS_DATOS")
+                report = parts[0]
+                
+                # Visualización de métricas
+                if len(parts) > 1:
+                    json_str = re.search(r'\{.*\}', parts[1], re.DOTALL).group()
+                    m = json.loads(json_str)
+                    
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Crítico", m.get("Critico", 0))
+                    c2.metric("Alto", m.get("Alto", 0))
+                    c3.metric("Medio", m.get("Medio", 0))
+                    c4.metric("Bajo", m.get("Bajo", 0))
+                    
+                    df = pd.DataFrame({"Nivel": list(m.keys()), "Hallazgos": list(m.values())})
+                    fig = px.bar(df, x="Nivel", y="Hallazgos", color="Nivel", 
+                                 color_discrete_map={"Critico": "black", "Alto": "red", "Medio": "orange", "Bajo": "blue"})
+                    st.plotly_chart(fig)
 
-                # Dashboard
-                st.subheader("📊 Resumen de Postura de Seguridad")
-                m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-                m_col1.metric("Crítico", metrics.get("Critico", 0))
-                m_col2.metric("Alto", metrics.get("Alto", 0))
-                m_col3.metric("Medio", metrics.get("Medio", 0))
-                m_col4.metric("Bajo", metrics.get("Bajo", 0))
-
-                # Gráfico
-                df_plot = pd.DataFrame({
-                    "Nivel": list(metrics.keys()),
-                    "Cantidad": list(metrics.values())
-                })
-                fig = px.bar(
-                    df_plot, x="Nivel", y="Cantidad", 
-                    color="Nivel",
-                    color_discrete_map={"Critico": "#000000", "Alto": "#FF4B4B", "Medio": "#FFA500", "Bajo": "#1F77B4"}
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-                st.markdown("---")
-                st.markdown("### 📋 Informe Técnico Detallado")
-                st.markdown(report_text)
-
-                st.download_button(
-                    label="💾 Descargar Informe",
-                    data=report_text,
-                    file_name="auditoria_waf.md"
-                )
+                st.markdown("### 📋 Informe de Seguridad")
+                st.markdown(report)
 
         except Exception as e:
-            st.error(f"Error técnico: {e}")
-            st.info("Nota: Si el error persiste como NOT_FOUND, intenta cambiar el modelo a 'gemini-1.5-flash' o 'gemini-2.0-flash-exp'.")
+            st.error(f"Error en el proceso: {e}")
