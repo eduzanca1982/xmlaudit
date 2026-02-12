@@ -13,7 +13,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# 2. CARGA DE SECRETOS (GOOGLE_API_KEY)
+# 2. CARGA DE SECRETOS
 try:
     api_key = st.secrets["GOOGLE_API_KEY"]
 except Exception:
@@ -29,7 +29,6 @@ st.markdown("""
 
 # 4. FUNCIÓN DE ANÁLISIS
 def analyze_configurations(xml_content):
-    # Definición de seguridad usando STRINGS para evitar errores de validación Pydantic
     safety_settings = {
         "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
         "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
@@ -37,8 +36,9 @@ def analyze_configurations(xml_content):
         "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
     }
 
+    # ACTUALIZACIÓN: Se usa gemini-2.0-flash para mayor compatibilidad con la API v1beta
     llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-pro",
+        model="gemini-2.0-flash", 
         google_api_key=api_key,
         temperature=0.1,
         safety_settings=safety_settings
@@ -54,7 +54,7 @@ def analyze_configurations(xml_content):
     1. Identifica configuraciones inseguras (ej. reglas críticas en modo ALERT en lugar de DENY).
     2. Detecta oportunidades de mejora en la postura de seguridad y optimización de reglas de Bot Manager.
     3. Encuentra posibles falsos positivos basados en las excepciones configuradas.
-    4. Genera una tabla de hallazgos con Criticidad, Descripción y Recomendación.
+    4. Genera una tabla de hallazgos con Criticidad (Critico, Alto, Medio, Bajo), Descripción y Recomendación.
 
     IMPORTANTE: Al final de tu respuesta, añade la sección "METRICAS_DATOS" seguida de un objeto JSON con este formato exacto:
     {{"Critico": X, "Alto": X, "Medio": X, "Bajo": X}}
@@ -69,22 +69,11 @@ def analyze_configurations(xml_content):
 st.title("🛡️ WAF Policy Auditor Pro")
 st.markdown("---")
 
-col_info, col_upload = st.columns([1, 2])
-
-with col_info:
-    st.info("""
-    **Análisis Técnico:**
-    - Auditoría de reglas Akamai.
-    - Soporte multi-archivo XML.
-    - Detección de brechas en App & API Protector.
-    """)
-
-with col_upload:
-    uploaded_files = st.file_uploader(
-        "Sube archivos XML de configuración", 
-        type=["xml"], 
-        accept_multiple_files=True
-    )
+uploaded_files = st.file_uploader(
+    "Sube archivos XML de configuración", 
+    type=["xml"], 
+    accept_multiple_files=True
+)
 
 if uploaded_files:
     if st.button("🔍 Iniciar Auditoría Profunda", use_container_width=True):
@@ -93,7 +82,7 @@ if uploaded_files:
             for f in uploaded_files:
                 combined_text += f"\n--- ORIGEN: {f.name} ---\n{f.read().decode('utf-8')}\n"
 
-            with st.spinner("Gemini analizando reglas de seguridad..."):
+            with st.spinner("Conectando con Gemini 2.0 Flash..."):
                 full_response = analyze_configurations(combined_text)
 
                 # Parsing de respuesta y JSON
@@ -110,7 +99,7 @@ if uploaded_files:
                 m_col3.metric("Medio", metrics.get("Medio", 0))
                 m_col4.metric("Bajo", metrics.get("Bajo", 0))
 
-                # Gráfico con Plotly
+                # Gráfico
                 df_plot = pd.DataFrame({
                     "Nivel": list(metrics.keys()),
                     "Cantidad": list(metrics.values())
@@ -134,3 +123,4 @@ if uploaded_files:
 
         except Exception as e:
             st.error(f"Error técnico: {e}")
+            st.info("Nota: Si el error persiste como NOT_FOUND, intenta cambiar el modelo a 'gemini-1.5-flash' o 'gemini-2.0-flash-exp'.")
