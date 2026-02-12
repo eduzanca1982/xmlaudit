@@ -6,27 +6,21 @@ import re
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 
-st.set_page_config(page_title="WAF Auditor 2.5 Pro", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="WAF/CDN Security Auditor", layout="wide")
 
-# 1. CARGA DE API KEY
 try:
     api_key = st.secrets["GOOGLE_API_KEY"]
 except:
-    st.error("Error: Configura GOOGLE_API_KEY en Secrets.")
+    st.error("Falta GOOGLE_API_KEY en Secrets.")
     st.stop()
 
-# 2. FUNCIÓN DE LIMPIEZA TÉCNICA (REDUCCIÓN DE TOKENS)
 def optimize_xml(xml_content):
-    # Eliminar comentarios
     xml_content = re.sub(r"", "", xml_content, flags=re.DOTALL)
-    # Eliminar metadata de Akamai que no influye en seguridad (ahorra ~15% de tokens)
-    tags_ignorar = ["lastModifiedBy", "lastModifiedDate", "createDate", "createdBy", "systemMetadata"]
+    tags_ignorar = ["lastModifiedBy", "lastModifiedDate", "createDate", "createdBy"]
     for tag in tags_ignorar:
         xml_content = re.sub(f"<{tag}>.*?</{tag}>", "", xml_content, flags=re.DOTALL)
-    # Minificar: quitar espacios en blanco innecesarios
     return " ".join(xml_content.split())
 
-# 3. LÓGICA DE AUDITORÍA
 def run_audit(content):
     safety_settings = {
         "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
@@ -35,7 +29,6 @@ def run_audit(content):
         "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
     }
 
-    # Usamos Gemini 2.5 Pro para máxima ventana de contexto
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-pro", 
         google_api_key=api_key,
@@ -44,50 +37,50 @@ def run_audit(content):
     )
     
     prompt = f"""
-    ERES: Senior Security Engineer / Akamai Specialist.
-    CONTEXTO: Se adjuntan políticas WAF en formato XML.
+    ERES: Auditor Senior de Ciberseguridad.
+    OBJETIVO: Detectar FALLAS CRÍTICAS en configuraciones WAF y CDN de Akamai.
     
-    TAREAS:
-    1. Detectar reglas críticas en modo 'Alert' que deberían estar en 'Deny'.
-    2. Identificar inconsistencias en la configuración de Bot Manager.
-    3. Listar oportunidades de mejora para endurecer (harden) la postura de seguridad.
+    ANALIZA EL XML BUSCANDO:
+    1. SEGURIDAD WAF: Reglas críticas en 'Alert', bypass de protección, excepciones de IP sospechosas.
+    2. CONFIGURACIÓN CDN: 
+       - Cache Poisoning: Cabeceras mal configuradas.
+       - TTLs: Cacheo de contenido sensible/personalizado.
+       - Protocolos: Falta de HSTS, TLS obsoletos (1.0/1.1), o redirecciones HTTP mal implementadas.
+       - Origin Pull: Fallas en la validación del certificado del origen.
     
-    IMPORTANTE: Finaliza con la sección METRICAS_DATOS y el JSON:
+    FORMATO DE RESPUESTA:
+    - Lista directa de Fallas Detectadas.
+    - Impacto Técnico.
+    - Acción Correctiva Inmediata.
+    
+    IMPORTANTE: Finaliza con METRICAS_DATOS y el JSON:
     {{"Critico": X, "Alto": X, "Medio": X, "Bajo": X}}
 
-    POLÍTICAS:
+    XML:
     {content}
     """
     
     return llm.invoke([HumanMessage(content=prompt)]).content
 
-# 4. INTERFAZ STREAMLIT
-st.title("🛡️ WAF Policy Auditor Pro (Gemini 2.5)")
+st.title("🛡️ Auditor de Fallas WAF & CDN")
 
-files = st.file_uploader("Sube archivos XML (Akamai WAF)", type="xml", accept_multiple_files=True)
+files = st.file_uploader("Subir archivos XML", type="xml", accept_multiple_files=True)
 
 if files:
-    if st.button("🚀 Iniciar Análisis de Gran Escala"):
+    if st.button("🔍 Ejecutar Detección de Fallas"):
         try:
             full_raw_text = ""
             for f in files:
                 full_raw_text += f.read().decode('utf-8')
             
-            # Optimización previa
-            with st.status("Optimizando XML y reduciendo tokens...") as status:
-                clean_text = optimize_xml(full_raw_text)
-                st.write(f"Tokens originales estimados: {len(full_raw_text)//4}")
-                st.write(f"Tokens tras optimización: {len(clean_text)//4}")
-                status.update(label="Análisis optimizado listo. Enviando a Gemini 2.5 Pro...", state="complete")
+            clean_text = optimize_xml(full_raw_text)
 
-            with st.spinner("Gemini 2.5 Pro analizando configuración masiva..."):
+            with st.spinner("Analizando brechas de seguridad..."):
                 response = run_audit(clean_text)
                 
-                # Separación de Informe y Métricas
                 parts = response.split("METRICAS_DATOS")
                 report = parts[0]
                 
-                # Visualización de métricas
                 if len(parts) > 1:
                     json_str = re.search(r'\{.*\}', parts[1], re.DOTALL).group()
                     m = json.loads(json_str)
@@ -98,13 +91,13 @@ if files:
                     c3.metric("Medio", m.get("Medio", 0))
                     c4.metric("Bajo", m.get("Bajo", 0))
                     
-                    df = pd.DataFrame({"Nivel": list(m.keys()), "Hallazgos": list(m.values())})
-                    fig = px.bar(df, x="Nivel", y="Hallazgos", color="Nivel", 
-                                 color_discrete_map={"Critico": "black", "Alto": "red", "Medio": "orange", "Bajo": "blue"})
-                    st.plotly_chart(fig)
+                    df = pd.DataFrame({"Nivel": list(m.keys()), "Fallas": list(m.values())})
+                    fig = px.bar(df, x="Nivel", y="Fallas", color="Nivel", 
+                                 color_discrete_map={"Critico": "black", "Alto": "#D32F2F", "Medio": "#F57C00", "Bajo": "#1976D2"})
+                    st.plotly_chart(fig, use_container_width=True)
 
-                st.markdown("### 📋 Informe de Seguridad")
+                st.markdown("### 🚫 Fallas de Seguridad Detectadas")
                 st.markdown(report)
 
         except Exception as e:
-            st.error(f"Error en el proceso: {e}")
+            st.error(f"Error: {e}")
