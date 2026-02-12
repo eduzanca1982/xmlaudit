@@ -5,6 +5,7 @@ import json
 import re
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 st.set_page_config(page_title="WAF/CDN Security Auditor", layout="wide")
 
@@ -14,14 +15,7 @@ except:
     st.error("Falta GOOGLE_API_KEY en Secrets.")
     st.stop()
 
-def optimize_xml(xml_content):
-    xml_content = re.sub(r"", "", xml_content, flags=re.DOTALL)
-    tags_ignorar = ["lastModifiedBy", "lastModifiedDate", "createDate", "createdBy"]
-    for tag in tags_ignorar:
-        xml_content = re.sub(f"<{tag}>.*?</{tag}>", "", xml_content, flags=re.DOTALL)
-    return " ".join(xml_content.split())
-
-def run_audit(content):
+def run_audit_chunked(content):
     safety_settings = {
         "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
         "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
@@ -29,72 +23,95 @@ def run_audit(content):
         "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
     }
 
+    # Usamos Flash para los chunks por velocidad y costo, o Pro si prefieres profundidad
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-pro", 
+        model="gemini-2.5-flash", 
         google_api_key=api_key,
         temperature=0,
         safety_settings=safety_settings
     )
-    
-    prompt = f"""
-    ERES: Auditor Senior de Ciberseguridad.
-    OBJETIVO: Detectar FALLAS CRÍTICAS en configuraciones WAF y CDN de Akamai.
-    
-    ANALIZA EL XML BUSCANDO:
-    1. SEGURIDAD WAF: Reglas críticas en 'Alert', bypass de protección, excepciones de IP sospechosas.
-    2. CONFIGURACIÓN CDN: 
-       - Cache Poisoning: Cabeceras mal configuradas.
-       - TTLs: Cacheo de contenido sensible/personalizado.
-       - Protocolos: Falta de HSTS, TLS obsoletos (1.0/1.1), o redirecciones HTTP mal implementadas.
-       - Origin Pull: Fallas en la validación del certificado del origen.
-    
-    FORMATO DE RESPUESTA:
-    - Lista directa de Fallas Detectadas.
-    - Impacto Técnico.
-    - Acción Correctiva Inmediata.
-    
-    IMPORTANTE: Finaliza con METRICAS_DATOS y el JSON:
-    {{"Critico": X, "Alto": X, "Medio": X, "Bajo": X}}
 
-    XML:
-    {content}
-    """
+    # Dividimos el XML en pedazos de ~800k tokens para dejar margen de seguridad
+    # Un token son aprox 4 caracteres en inglés/código
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=3000000, # Caracteres, no tokens
+        chunk_overlap=50000,
+        separators=["<rule>", "<match-case>", "<forward-server>", "\n"]
+    )
+    chunks = text_splitter.split_text(content)
     
-    return llm.invoke([HumanMessage(content=prompt)]).content
+    all_reports = []
+    total_metrics = {"Critico": 0, "Alto": 0, "Medio": 0, "Bajo": 0}
 
-st.title("🛡️ Auditor de Fallas WAF & CDN")
+    progress_bar = st.progress(0)
+    for i, chunk in enumerate(chunks):
+        st.write(f"Analizando fragmento {i+1} de {len(chunks)}...")
+        
+        prompt = f"""
+        ERES: Auditor Senior de Ciberseguridad.
+        OBJETIVO: Detectar FALLAS CRÍTICAS en configuraciones WAF y CDN de Akamai.
+        
+        ANALIZA ESTE FRAGMENTO DE XML:
+        1. WAF: Reglas en 'Alert', bypass, excepciones inseguras.
+        2. CDN: Cache Poisoning, TTLs sensibles, protocolos TLS viejos, fallas en HSTS.
+        
+        FORMATO:
+        - Lista directa de Fallas.
+        - Impacto y Acción Correctiva.
+        
+        Finaliza con METRICAS_DATOS y el JSON:
+        {{"Critico": X, "Alto": X, "Medio": X, "Bajo": X}}
+
+        XML:
+        {chunk}
+        """
+        
+        response = llm.invoke([HumanMessage(content=prompt)]).content
+        
+        # Extraer métricas de este chunk y sumarlas
+        parts = response.split("METRICAS_DATOS")
+        all_reports.append(parts[0])
+        
+        if len(parts) > 1:
+            try:
+                json_str = re.search(r'\{.*\}', parts[1], re.DOTALL).group()
+                m = json.loads(json_str)
+                for key in total_metrics:
+                    total_metrics[key] += m.get(key, 0)
+            except:
+                pass
+        
+        progress_bar.progress((i + 1) / len(chunks))
+
+    return "\n".join(all_reports), total_metrics
+
+# --- INTERFAZ ---
+st.title("🛡️ Auditor de Fallas WAF & CDN (Contexto Extendido)")
 
 files = st.file_uploader("Subir archivos XML", type="xml", accept_multiple_files=True)
 
 if files:
-    if st.button("🔍 Ejecutar Detección de Fallas"):
+    if st.button("🔍 Iniciar Auditoría"):
         try:
-            full_raw_text = ""
-            for f in files:
-                full_raw_text += f.read().decode('utf-8')
+            full_text = "".join([f.read().decode('utf-8') for f in files])
             
-            clean_text = optimize_xml(full_raw_text)
+            # Limpieza básica de espacios para ahorrar algo de espacio inicial
+            full_text = " ".join(full_text.split())
 
-            with st.spinner("Analizando brechas de seguridad..."):
-                response = run_audit(clean_text)
+            with st.spinner("Procesando archivos masivos..."):
+                report, metrics = run_audit_chunked(full_text)
                 
-                parts = response.split("METRICAS_DATOS")
-                report = parts[0]
+                # Visualización
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Crítico", metrics["Critico"])
+                c2.metric("Alto", metrics["Alto"])
+                c3.metric("Medio", metrics["Medio"])
+                c4.metric("Bajo", metrics["Bajo"])
                 
-                if len(parts) > 1:
-                    json_str = re.search(r'\{.*\}', parts[1], re.DOTALL).group()
-                    m = json.loads(json_str)
-                    
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Crítico", m.get("Critico", 0))
-                    c2.metric("Alto", m.get("Alto", 0))
-                    c3.metric("Medio", m.get("Medio", 0))
-                    c4.metric("Bajo", m.get("Bajo", 0))
-                    
-                    df = pd.DataFrame({"Nivel": list(m.keys()), "Fallas": list(m.values())})
-                    fig = px.bar(df, x="Nivel", y="Fallas", color="Nivel", 
-                                 color_discrete_map={"Critico": "black", "Alto": "#D32F2F", "Medio": "#F57C00", "Bajo": "#1976D2"})
-                    st.plotly_chart(fig, use_container_width=True)
+                df = pd.DataFrame({"Nivel": list(metrics.keys()), "Fallas": list(metrics.values())})
+                fig = px.bar(df, x="Nivel", y="Fallas", color="Nivel", 
+                             color_discrete_map={"Critico": "black", "Alto": "#D32F2F", "Medio": "#F57C00", "Bajo": "#1976D2"})
+                st.plotly_chart(fig, use_container_width=True)
 
                 st.markdown("### 🚫 Fallas de Seguridad Detectadas")
                 st.markdown(report)
